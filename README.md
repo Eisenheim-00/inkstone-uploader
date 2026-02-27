@@ -1,6 +1,6 @@
-# 📂 Inkstone Chapter Uploader — Chrome Extension
+# 📂 Chapter Uploader — Chrome Extension
 
-Automatically fill and publish chapters from your local `.md` files directly into the Inkstone chapter editor.
+Automatically fill and publish chapters from your local `.md` files directly into **Inkstone (WebNovel)** and **Royal Road** chapter editors.
 
 ---
 
@@ -20,7 +20,7 @@ Automatically fill and publish chapters from your local `.md` files directly int
 
 5. Select the `inkstone-uploader` folder.
 
-6. Done! You'll see the extension listed. No need to pin it — it activates automatically on Inkstone.
+6. Done! The extension activates automatically on both Inkstone and Royal Road. The panel header shows which platform it detected.
 
 ---
 
@@ -41,33 +41,68 @@ Automatically fill and publish chapters from your local `.md` files directly int
   Content of your chapter goes here...
   ```
 
-### Uploading
+---
 
+## 📗 Inkstone (WebNovel)
+
+### How it works
 1. Go to [inkstone.webnovel.com](https://inkstone.webnovel.com) and open your novel.
 2. Click **"Create Chapter"** — this opens the chapter editor.
-3. A floating panel titled **📂 Chapter Uploader** will appear on the right side.
+3. The **📂 Chapter Uploader** panel appears on the right. The badge in the header will say **Inkstone**.
 4. Click **"Select .md files"** and pick all your chapter files at once.
-5. Choose your options:
-   - ✅ **Use filename as chapter title** — uses the file name (minus `.md`) as the title.
-     Uncheck this if your files start with `# Your Title` and you want to use that instead.
-   - **Delay between chapters** — time (ms) to wait between chapters during auto-upload.
-     Default 2000ms (2 seconds) is safe. Increase if Inkstone feels slow on your connection.
-6. Click **▶ Auto-Upload All Chapters** and watch it go!
+5. Set your options (see Options section below).
+6. Click **▶ Auto-Upload All Chapters** and walk away.
 
-### Manual mode
-- Click **⬇ Fill This Chapter Only** to just fill the current open chapter without publishing.
-  Useful if you want to review before hitting Publish yourself.
+### What it does automatically
+- Fills the chapter title and body
+- Clicks **Publish**
+- Clicks **Confirm** in the modal
+- Returns to the novel overview, clicks **Create Chapter**
+- Repeats for every file
 
 ---
 
-## ⚠ Important Notes
+## 📘 Royal Road
 
-- **Stay on the page** during auto-upload. Don't switch tabs or the automation may break.
-- Inkstone must be open on the chapter editor page for the tool to work.
-- After each chapter is published, Inkstone should automatically open a new blank editor.
-  If it doesn't, the auto-uploader will pause and tell you in the log.
-- The tool **strips Markdown formatting** (bold, italic, headers, etc.) since Inkstone's
-  editor doesn't render Markdown syntax.
+### How it works
+1. Go to your novel's chapter list on Royal Road.
+2. Click **"Add Chapter"** — this opens the chapter editor.
+3. The **📂 Chapter Uploader** panel appears. The badge will say **Royal Road**.
+4. Click **"Select .md files"** and pick all your chapter files at once.
+5. Set your options (see Options section below).
+6. Click **▶ Auto-Upload All Chapters** and walk away.
+
+### What it does automatically
+- Fills the chapter title and body
+- Saves your remaining chapters before the page reloads
+- Clicks **Publish Chapter**
+- Automatically navigates to the new chapter editor
+- Resumes uploading the next chapter
+
+### ⚠ Royal Road specific notes
+- **Don't close the tab** during auto-upload. The extension uses the tab's session memory to track remaining chapters — closing the tab clears it.
+- If the process is interrupted mid-way (e.g. you accidentally close the tab), you'll need to start again from where it left off. Check your Royal Road chapter list to see which chapters were already published.
+- Royal Road redirects to a chapter preview after each publish — this is normal. The extension handles the redirect automatically.
+
+---
+
+## ⚙ Options
+
+| Option | Description |
+|---|---|
+| **Use filename as chapter title** | Uses the file name (minus `.md`) as the chapter title. Uncheck if your files start with `# Your Title` and you want that used instead. |
+| **Delay between chapters (ms)** | How long to wait between chapters. Default 2000ms. Increase if your connection is slow or the site feels laggy. |
+
+### Manual mode
+Click **⬇ Fill This Chapter Only** to fill the current open chapter without publishing — useful if you want to review the content before publishing yourself.
+
+---
+
+## ⚠ General Notes
+
+- **Stay on the page** and don't switch tabs during auto-upload.
+- The tool **strips Markdown formatting** (bold, italic, headers, etc.) and pastes as plain text, preserving your spacing and line breaks.
+- Chapters are sorted in **natural order** — so Chapter 9 comes before Chapter 10, not after Chapter 100.
 
 ---
 
@@ -75,11 +110,14 @@ Automatically fill and publish chapters from your local `.md` files directly int
 
 | Problem | Fix |
 |---|---|
-| Panel doesn't appear | Refresh the Inkstone page |
-| Title field not found | Make sure you're on the chapter editor page (after clicking Create Chapter) |
-| Body not filling | Click once inside the chapter editor area, then try again |
-| Publish button not found | Wait a moment for the page to fully load, then retry |
+| Panel doesn't appear | Refresh the page |
+| Badge shows wrong platform | You're on the wrong page — navigate to the chapter editor first |
+| Title field not found | Make sure you're on the chapter editor page, not the novel overview |
+| Body not filling | Click **🔍 Debug Editor** and share the log output |
+| Publish button not found | Wait for the page to fully load, then retry |
 | Auto-upload stops mid-way | Increase the delay value and try again |
+| Royal Road keeps repeating a chapter | Refresh the extension at `chrome://extensions` and start again |
+| Royal Road loses progress | Don't close the tab mid-upload — session is tab-scoped |
 
 ---
 
