@@ -1,15 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "Inkstone Chapter Uploader",
-  "version": "1.2",
-  "description": "Upload .md chapter files directly to Inkstone's chapter editor.",
+  "name": "Chapter Uploader",
+  "version": "1.3",
+  "description": "Upload .md chapter files to Inkstone (WebNovel) and Royal Road automatically.",
   "permissions": ["scripting", "activeTab", "clipboardWrite"],
   "host_permissions": [
-    "https://inkstone.webnovel.com/*"
+    "https://inkstone.webnovel.com/*",
+    "https://www.royalroad.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://inkstone.webnovel.com/*"],
+      "matches": [
+        "https://inkstone.webnovel.com/*",
+        "https://www.royalroad.com/*"
+      ],
       "js": ["content.js"],
       "css": ["panel.css"],
       "run_at": "document_idle",

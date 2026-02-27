@@ -1,22 +1,225 @@
 // ================================================================
-// Inkstone Chapter Uploader - content.js
-// Runs in MAIN world (manifest world: "MAIN") so it can access
-// window.tinymce directly without any bridge.
+// Chapter Uploader - content.js
+// Supports: Inkstone (inkstone.webnovel.com) + Royal Road (royalroad.com)
+// Runs in MAIN world to access window.tinymce directly.
 // ================================================================
 
 (function () {
   'use strict';
 
+  // ================================================================
+  // PLATFORM DETECTION
+  // ================================================================
+  const PLATFORM = (() => {
+    const host = window.location.hostname;
+    if (host.includes('royalroad.com')) return 'royalroad';
+    if (host.includes('webnovel.com'))  return 'inkstone';
+    return 'unknown';
+  })();
+
+  const PLATFORM_CONFIG = {
+    inkstone: {
+      name: 'Inkstone',
+      color: '#1a1a2e',
+      hint: 'Click <strong>Create Chapter</strong> first, then load your <strong>.md</strong> files.',
+      getTitleEl: () => document.querySelector('.input_title--plhUv, input[placeholder="Title Here"]'),
+      // Inkstone: one TinyMCE editor, target it by active editor
+      getBodyEditor: () => {
+        if (typeof tinymce === 'undefined') return null;
+        return tinymce.activeEditor || (tinymce.editors && tinymce.editors[0]) || null;
+      },
+      clickPublish: () => {
+        const btn = Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim().toUpperCase() === 'PUBLISH');
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        return false;
+      },
+      // Inkstone has a confirm modal after Publish
+      needsConfirm: true,
+      clickConfirm: () => {
+        const btn = Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim().toUpperCase() === 'CONFIRM');
+        if (btn) { btn.click(); return true; }
+        return false;
+      },
+      // After confirm, Inkstone returns to novel overview — click Create Chapter
+      afterPublish: async (delay, log, waitFor, sleep) => {
+        log(`  ⏳ Waiting ${delay}ms for overview...`);
+        await sleep(delay);
+        log('  🆕 Clicking Create Chapter...');
+        try {
+          await waitFor(() => {
+            const btn = Array.from(document.querySelectorAll('button, a'))
+              .find(el => el.textContent.trim().toUpperCase().includes('CREATE CHAPTER'));
+            if (btn) { btn.click(); return true; }
+            return false;
+          }, 8000);
+        } catch { log('  ❌ "Create Chapter" button not found. Stopping.'); return false; }
+        log('  ⏳ Waiting for chapter editor...');
+        try {
+          await waitFor(() => {
+            const cfg = PLATFORM_CONFIG.inkstone;
+            return cfg.getTitleEl() !== null && document.querySelector('iframe.tox-edit-area__iframe') !== null;
+          }, 10000);
+        } catch { log('  ⚠ Editor did not load. Stopping.'); return false; }
+        await sleep(800);
+        return true;
+      },
+    },
+
+    royalroad: {
+      name: 'Royal Road',
+      color: '#1a1a2e',
+      hint: 'You\'re on the Royal Road chapter editor. Load your <strong>.md</strong> files and go!',
+      getTitleEl: () => document.querySelector('#Title, input[placeholder="Title of chapter"]'),
+      // Royal Road has 3 TinyMCE instances: PreAuthorNotes, contentEditor, PostAuthorNotes
+      // We target the main content editor specifically by its textarea id
+      getBodyEditor: () => {
+        if (typeof tinymce === 'undefined') return null;
+        // Find the editor associated with contentEditor textarea
+        const editors = tinymce.editors || [];
+        const content = editors.find(e => e.id === 'contentEditor' || e.targetElm?.id === 'contentEditor');
+        if (content) return content;
+        // Fallback: pick the largest editor (most likely the chapter body)
+        if (editors.length > 0) {
+          return editors.reduce((best, ed) => {
+            const bh = best.getContainer()?.offsetHeight || 0;
+            const eh = ed.getContainer()?.offsetHeight || 0;
+            return eh > bh ? ed : best;
+          });
+        }
+        return null;
+      },
+      clickPublish: () => {
+        // Save session BEFORE form submits — JS dies the moment the form goes through
+        // We hook beforeunload to do a last-second sessionStorage save
+        const match = window.location.href.match(/\/chapters\/(?:new|edit)\/(\d+)/);
+        const fictionId = match ? match[1] : null;
+        if (fictionId) sessionStorage.setItem('icu_fictionid', fictionId);
+
+        const btn = Array.from(document.querySelectorAll('button[type="submit"]'))
+          .find(b => b.value === 'publish' || b.textContent.trim().toUpperCase().includes('PUBLISH CHAPTER'));
+        if (btn) { btn.click(); return true; }
+        return false;
+      },
+      // Royal Road submits a form — no confirm modal
+      needsConfirm: false,
+      clickConfirm: () => true,
+      // afterPublish is never really reached since the form causes a full page reload.
+      // The session is saved via beforeunload (see setupRoyalRoadUnloadSave below),
+      // and the new page auto-resumes via loadSession() on boot.
+      afterPublish: async (delay, log, waitFor, sleep) => {
+        return true; // no-op: unload handler and boot restore handle everything
+      },
+    },
+  };
+
+  const cfg = PLATFORM_CONFIG[PLATFORM] || PLATFORM_CONFIG.inkstone;
+
+  // ================================================================
+  // STATE — persisted across page navigations for Royal Road
+  // ================================================================
   let files = [];
   let currentIndex = 0;
   let stopRequested = false;
 
-  // Boot: inject panel once
+  // Royal Road navigates to a new page between chapters.
+  // We encode file contents into sessionStorage before navigating,
+  // then restore them on the next page load.
+  function saveSession(delay) {
+    if (PLATFORM !== 'royalroad') return;
+    const fileData = files.slice(currentIndex).map(f => ({
+      name: f.name,
+      // store as data URL via FileReader — but since we can't await here,
+      // we use a sync-friendly approach: store the already-read text
+      // (files are read at fill time, so we re-read and store below)
+    }));
+    sessionStorage.setItem('icu_delay', delay);
+    sessionStorage.setItem('icu_total', files.length);
+    sessionStorage.setItem('icu_index', currentIndex);
+  }
+
+  async function saveFilesToSession(delay) {
+    const match = window.location.href.match(/\/chapters\/(?:new|edit)\/(\d+)/);
+    const fictionId = match ? match[1] : null;
+    if (fictionId) sessionStorage.setItem('icu_fictionid', fictionId);
+    sessionStorage.setItem('icu_delay', delay);
+    sessionStorage.setItem('icu_usefilename', document.getElementById('icu-use-filename').checked);
+    sessionStorage.setItem('icu_running', 'true');
+    // Store remaining file contents — slice from currentIndex+1
+    // because currentIndex is being published right now
+    const remaining = files.slice(currentIndex + 1);
+    const contents = [];
+    for (const f of remaining) {
+      const text = await readFileAsText(f);
+      contents.push({ name: f.name, text });
+    }
+    sessionStorage.setItem('icu_files', JSON.stringify(contents));
+  }
+
+  function loadSession() {
+    if (PLATFORM !== 'royalroad') return false;
+    if (sessionStorage.getItem('icu_running') !== 'true') return false;
+
+    try {
+      const stored = JSON.parse(sessionStorage.getItem('icu_files') || '[]');
+      if (!stored.length) return false;
+
+      // Reconstruct as Blob-based File objects
+      files = stored.map(f => new File([f.text], f.name, { type: 'text/plain' }));
+      currentIndex = 0; // always start from 0 since we sliced at save time
+      sessionStorage.removeItem('icu_running');
+      sessionStorage.removeItem('icu_files');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ================================================================
+  // BOOT
+  // ================================================================
   const bootInterval = setInterval(() => {
     if (document.getElementById('icu-panel')) return;
     injectPanel();
     clearInterval(bootInterval);
+    // Royal Road: check if we landed on a non-editor page after publish
+    // (e.g. chapter preview) and need to redirect to the new chapter editor
+    if (PLATFORM === 'royalroad') {
+      const pendingFictionId = sessionStorage.getItem('icu_fictionid');
+      const hasSession = sessionStorage.getItem('icu_running') === 'true';
+      const onEditorPage = !!document.querySelector('#Title, input[placeholder="Title of chapter"]');
+
+      if (hasSession && pendingFictionId && !onEditorPage) {
+        // We're on a non-editor page (preview/homepage) — redirect to new chapter editor
+        sessionStorage.removeItem('icu_fictionid');
+        window.location.href = `https://www.royalroad.com/author-dashboard/chapters/new/${pendingFictionId}`;
+        return;
+      }
+
+      if (loadSession()) {
+        renderFileList();
+        log(`🔄 Resuming auto-upload (${files.length} chapter(s) remaining)...`);
+        setTimeout(() => startAutoUpload(), 1500);
+      }
+    }
   }, 1000);
+
+  // Royal Road: save session to sessionStorage right before page unloads
+  // This fires when the publish form submits and the page navigates away
+  function setupRoyalRoadUnloadSave() {
+    if (PLATFORM !== 'royalroad') return;
+    window.addEventListener('beforeunload', () => {
+      if (files.length > 0 && currentIndex < files.length) {
+        const delay = parseInt(document.getElementById('icu-delay')?.value || '2000');
+        // Synchronously save what we can — beforeunload must be sync
+        sessionStorage.setItem('icu_delay', delay);
+        sessionStorage.setItem('icu_usefilename', document.getElementById('icu-use-filename')?.checked);
+        sessionStorage.setItem('icu_running', 'true');
+        // Note: file contents were already saved async when fill ran — see saveFilesToSession
+      }
+    });
+  }
 
   // ================================================================
   // PANEL
@@ -27,12 +230,11 @@
     panel.innerHTML = `
       <div id="icu-header">
         📂 Chapter Uploader
+        <span id="icu-platform-badge">${cfg.name}</span>
         <button id="icu-minimize" title="Minimize">—</button>
       </div>
       <div id="icu-body">
-        <p class="icu-hint">
-          Click <strong>Create Chapter</strong> first, then load your <strong>.md</strong> files.
-        </p>
+        <p class="icu-hint">${cfg.hint}</p>
 
         <label class="icu-label">Select .md files:</label>
         <input type="file" id="icu-file-input" accept=".md" multiple />
@@ -80,42 +282,17 @@
   // DEBUG
   // ================================================================
   async function runDebug() {
-    log('🔍 Debug check...');
-
-    // 1. Check tinymce global
+    log(`🔍 Debug check (${cfg.name})...`);
     if (typeof tinymce !== 'undefined') {
-      log(`  ✅ window.tinymce found! Version: ${tinymce.majorVersion || '?'}`);
-      const editors = tinymce.editors || [];
-      log(`  editors: ${editors.length}`);
-      if (tinymce.activeEditor) {
-        log(`  activeEditor id: ${tinymce.activeEditor.id}`);
-      } else {
-        log(`  ⚠ activeEditor is null`);
-      }
+      log(`  ✅ tinymce found, ${tinymce.editors?.length || 0} editor(s)`);
+      tinymce.editors?.forEach((e, i) => log(`    [${i}] id: ${e.id}, height: ${e.getContainer()?.offsetHeight}px`));
     } else {
-      log('  ❌ window.tinymce NOT found');
+      log('  ❌ tinymce NOT found');
     }
-
-    // 2. Check for the iframe
-    const iframe = document.querySelector('iframe.tox-edit-area__iframe');
-    if (iframe) {
-      log(`  ✅ TinyMCE iframe found: ${iframe.id}`);
-      try {
-        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-        const body = iframeDoc.body;
-        log(`  iframe body tag: ${body ? body.tagName : 'null'}`);
-        log(`  iframe body contenteditable: ${body ? body.contentEditable : 'n/a'}`);
-        log(`  iframe body text (first 50): "${body ? body.innerText.slice(0, 50) : ''}"`)
-      } catch(e) {
-        log(`  ❌ Cannot access iframe content: ${e.message}`);
-      }
-    } else {
-      log('  ❌ TinyMCE iframe NOT found in DOM');
-    }
-
-    // 3. Check title field
-    const titleEl = getTitleEl();
-    log(`  Title field: ${titleEl ? '✅ found (' + titleEl.className + ')' : '❌ not found'}`);
+    const editor = cfg.getBodyEditor();
+    log(`  Body editor: ${editor ? '✅ ' + editor.id : '❌ not found'}`);
+    const titleEl = cfg.getTitleEl();
+    log(`  Title field: ${titleEl ? '✅ ' + (titleEl.id || titleEl.className) : '❌ not found'}`);
   }
 
   // ================================================================
@@ -198,23 +375,9 @@
     });
   }
 
-  // No HTML conversion needed — we paste as plain text to preserve formatting
-
   // ================================================================
   // TITLE
   // ================================================================
-  function getTitleEl() {
-    for (const sel of [
-      '.input_title--plhUv',
-      'input[placeholder="Title Here"]',
-      'input[placeholder*="Title"]',
-    ]) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
-    return null;
-  }
-
   function setTitle(el, value) {
     el.focus();
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -224,102 +387,54 @@
   }
 
   // ================================================================
-  // BODY — paste as plain text (matches Ctrl+Shift+V behavior)
+  // BODY — plain text paste into TinyMCE
   // ================================================================
   async function setBody(text) {
-    // Strategy 1: Use TinyMCE's insertContent with plain text
-    // This mirrors what Ctrl+Shift+V does — no HTML wrapping
-    if (typeof tinymce !== 'undefined') {
-      const ed = tinymce.activeEditor || (tinymce.editors && tinymce.editors[0]);
-      if (ed) {
-        try {
-          // Select all and delete first to clear placeholder content
-          ed.execCommand('selectAll');
-          ed.execCommand('Delete');
-
-          // Insert as plain text — TinyMCE will handle line breaks naturally
-          // just like a plain text paste would
-          ed.getBody().focus();
-
-          const dt = new DataTransfer();
-          dt.setData('text/plain', text);
-
-          const pasteEvent = new ClipboardEvent('paste', {
-            bubbles: true,
-            cancelable: true,
-            clipboardData: dt,
-          });
-
-          ed.getBody().dispatchEvent(pasteEvent);
-          ed.fire('change');
-          log('  📝 Body filled via plain text paste');
-          return true;
-        } catch (e) {
-          log(`  ⚠ Plain text paste failed: ${e.message}, trying fallback...`);
-        }
-
-        // Fallback: insertContent as preformatted text
-        try {
-          ed.execCommand('selectAll');
-          ed.execCommand('Delete');
-          // Wrap in <pre> to preserve whitespace, then let TinyMCE normalize it
-          ed.insertContent(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'));
-          ed.fire('change');
-          log('  📝 Body filled via insertContent fallback');
-          return true;
-        } catch (e) {
-          log(`  ⚠ insertContent fallback failed: ${e.message}`);
-        }
-      }
+    let editor = cfg.getBodyEditor();
+    if (!editor) {
+      log('  ⏳ Waiting for TinyMCE...');
+      await sleep(1500);
+      editor = cfg.getBodyEditor();
+    }
+    if (!editor) {
+      log('  ❌ TinyMCE editor not found. Run 🔍 Debug for details.');
+      return false;
     }
 
-    // Strategy 2: paste directly into iframe body
-    const iframe = document.querySelector('iframe.tox-edit-area__iframe');
-    if (iframe) {
+    try {
+      editor.execCommand('selectAll');
+      editor.execCommand('Delete');
+      editor.getBody().focus();
+
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      editor.getBody().dispatchEvent(new ClipboardEvent('paste', {
+        bubbles: true, cancelable: true, clipboardData: dt,
+      }));
+      editor.fire('change');
+      log('  📝 Body filled via plain text paste');
+      return true;
+    } catch (e) {
+      log(`  ⚠ Paste failed: ${e.message}, trying fallback...`);
       try {
-        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-        const body = iframeDoc.body;
-        if (body) {
-          body.focus();
-          iframeDoc.execCommand('selectAll', false, null);
-
-          const dt = new DataTransfer();
-          dt.setData('text/plain', text);
-          const pasteEvent = new ClipboardEvent('paste', {
-            bubbles: true,
-            cancelable: true,
-            clipboardData: dt,
-          });
-          body.dispatchEvent(pasteEvent);
-          log('  📝 Body filled via iframe paste');
-          return true;
-        }
-      } catch (e) {
-        log(`  ⚠ iframe paste failed: ${e.message}`);
+        editor.execCommand('selectAll');
+        editor.execCommand('Delete');
+        editor.insertContent(
+          text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')
+        );
+        editor.fire('change');
+        log('  📝 Body filled via insertContent fallback');
+        return true;
+      } catch (e2) {
+        log(`  ❌ Body fill failed: ${e2.message}`);
+        return false;
       }
     }
-
-    log('  ❌ All body fill strategies failed. Run 🔍 Debug Editor for details.');
-    return false;
   }
 
   // ================================================================
-  // PUBLISH / CONFIRM
+  // HELPERS
   // ================================================================
-  function clickPublish() {
-    const btn = Array.from(document.querySelectorAll('button'))
-      .find(b => b.textContent.trim().toUpperCase() === 'PUBLISH');
-    if (btn && !btn.disabled) { btn.click(); return true; }
-    return false;
-  }
-
-  function clickConfirm() {
-    const btn = Array.from(document.querySelectorAll('button'))
-      .find(b => b.textContent.trim().toUpperCase() === 'CONFIRM');
-    if (btn) { btn.click(); return true; }
-    return false;
-  }
-
   function waitFor(fn, timeout = 8000, interval = 200) {
     return new Promise((resolve, reject) => {
       const start = Date.now();
@@ -350,15 +465,13 @@
     const title = useFilename ? file.name.replace(/\.md$/i, '') : (parsed.title || file.name.replace(/\.md$/i, ''));
     const body = stripMarkdown(parsed.body || rawText);
 
-    // Title
-    const titleEl = getTitleEl();
+    const titleEl = cfg.getTitleEl();
     if (!titleEl) { log('⚠ Title field not found. Are you on the chapter editor page?'); return false; }
     setTitle(titleEl, title);
     log(`  ✏ Title: "${title}"`);
 
     await sleep(400);
 
-    // Body
     const ok = await setBody(body);
     if (!ok) return false;
 
@@ -373,35 +486,42 @@
     if (!files.length) return;
     stopRequested = false;
     setButtons(true);
-    log(`🚀 Auto-uploading ${files.length - currentIndex} chapter(s)...`);
+    log(`🚀 Auto-uploading ${files.length - currentIndex} chapter(s) on ${cfg.name}...`);
     const delay = parseInt(document.getElementById('icu-delay').value) || 2000;
+    if (PLATFORM === 'royalroad') setupRoyalRoadUnloadSave();
 
     while (currentIndex < files.length) {
       if (stopRequested) { log('⏹ Stopped.'); break; }
       markFileActive(currentIndex);
 
       const ok = await fillChapter();
-      if (!ok) {
-        markFileDone(currentIndex, false);
-        currentIndex++;
-        continue;
-      }
+      if (!ok) { markFileDone(currentIndex, false); currentIndex++; continue; }
 
       await sleep(600);
 
-      log('  🔵 Clicking Publish...');
-      if (!clickPublish()) {
-        await sleep(1000);
-        if (!clickPublish()) { log('  ❌ Publish button not found. Stopping.'); markFileDone(currentIndex, false); break; }
+      // Royal Road: save session NOW before the form submit kills the page
+      if (PLATFORM === 'royalroad') {
+        log('  💾 Saving session before publish...');
+        await saveFilesToSession(delay);
       }
 
-      log('  ⏳ Waiting for confirm modal...');
-      try {
-        await waitFor(() => Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim().toUpperCase() === 'CONFIRM'), 6000);
-      } catch { log('  ❌ Confirm modal never appeared. Stopping.'); markFileDone(currentIndex, false); break; }
+      log('  🔵 Clicking Publish...');
+      if (!cfg.clickPublish()) {
+        await sleep(1000);
+        if (!cfg.clickPublish()) { log('  ❌ Publish button not found. Stopping.'); markFileDone(currentIndex, false); break; }
+      }
 
-      await sleep(400);
-      clickConfirm();
+      // Inkstone needs confirm modal; Royal Road submits directly
+      if (cfg.needsConfirm) {
+        log('  ⏳ Waiting for confirm modal...');
+        try {
+          await waitFor(() => Array.from(document.querySelectorAll('button'))
+            .some(b => b.textContent.trim().toUpperCase() === 'CONFIRM'), 6000);
+        } catch { log('  ❌ Confirm modal never appeared. Stopping.'); markFileDone(currentIndex, false); break; }
+        await sleep(400);
+        cfg.clickConfirm();
+      }
+
       markFileDone(currentIndex, true);
       log(`  🎉 "${files[currentIndex].name}" published!`);
       currentIndex++;
@@ -409,40 +529,12 @@
       if (currentIndex >= files.length) { log('🏁 All done!'); break; }
       if (stopRequested) { log('⏹ Stopped.'); break; }
 
-      // Wait for page to return to novel overview
-      log(`  ⏳ Waiting ${delay}ms for overview to load...`);
-      await sleep(delay);
+      // Platform-specific: navigate to next chapter editor
+      const continued = await cfg.afterPublish(delay, log, waitFor, sleep);
+      if (!continued) break;
 
-      // Click "Create Chapter" button
-      log('  🆕 Clicking Create Chapter...');
-      try {
-        await waitFor(() => {
-          const btn = Array.from(document.querySelectorAll('button, a'))
-            .find(el => el.textContent.trim().toUpperCase().includes('CREATE CHAPTER'));
-          if (btn) { btn.click(); return true; }
-          return false;
-        }, 8000);
-      } catch {
-        log('  ❌ "Create Chapter" button not found. Stopping.');
-        break;
-      }
-
-      // Wait for the chapter editor to load (title field appears)
-      log('  ⏳ Waiting for chapter editor to load...');
-      try {
-        await waitFor(() => {
-          const t = getTitleEl();
-          const iframe = document.querySelector('iframe.tox-edit-area__iframe');
-          return t !== null && iframe !== null;
-        }, 10000);
-      } catch {
-        log('  ⚠ Chapter editor did not load. Stopping.');
-        break;
-      }
-
-      // Small extra pause to let TinyMCE fully initialize
-      await sleep(800);
       log(`  ➡ Next: chapter ${currentIndex + 1}`);
+      await sleep(500);
     }
 
     setButtons(false);
